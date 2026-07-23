@@ -1,0 +1,11 @@
+node_modules/
+dist/
+playwright-report/
+test-results/
+results/raw/*.json
+results/raw/*.csv
+results/reports/*.html
+!.gitkeep
+.DS_Store
+.env
+

@@ -1,0 +1,59 @@
+name: cpeit-map-performance-lab
+
+services:
+  postgis:
+    image: postgis/postgis:17-3.5
+    # Official PostGIS images are amd64-only for this pinned tag; Docker Desktop
+    # transparently emulates it on Apple Silicon to keep the lab reproducible.
+    platform: linux/amd64
+    environment:
+      POSTGRES_DB: benchmark
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: benchmark
+    volumes:
+      - postgis-data:/var/lib/postgresql/data
+      - ./infra/postgis/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U benchmark -d benchmark"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    shm_size: 1gb
+
+  martin:
+    image: ghcr.io/maplibre/martin:1.3.1
+    environment:
+      DATABASE_URL: postgresql://benchmark:benchmark@postgis:5432/benchmark
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  k6:
+    image: grafana/k6:2.0.0
+    profiles: ["load"]
+    environment:
+      BASE_URL: http://martin:3000
+      K6_PROFILE: ${K6_PROFILE:-load}
+      RESULT_PATH: /results/raw/k6-summary.json
+    volumes:
+      - ./tests/load:/tests:ro
+      - ./results:/results
+    depends_on:
+      - martin
+
+  mapserver:
+    image: camptocamp/mapserver:8.6
+    profiles: ["mapserver"]
+    ports:
+      - "8080:80"
+    volumes:
+      - ./infra/mapserver:/etc/mapserver:ro
+    depends_on:
+      postgis:
+        condition: service_healthy
+
+volumes:
+  postgis-data:

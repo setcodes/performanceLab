@@ -1,0 +1,37 @@
+{
+  "name": "cpeit-map-performance-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc --noEmit && vite build",
+    "build:sites": "npm run build && node scripts/prepare-sites-build.mjs",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "playwright test",
+    "test:browser": "playwright test tests/browser",
+    "test:browser:headed": "playwright test tests/browser --headed",
+    "test:browser:mvt": "TEST_MVT=1 playwright test tests/browser",
+    "report": "node scripts/build-report.mjs",
+    "infra:up": "docker compose up -d --wait postgis martin",
+    "infra:down": "docker compose down",
+    "infra:reset": "docker compose down -v",
+    "infra:logs": "docker compose logs -f postgis martin",
+    "infra:seed": "./scripts/reseed.sh",
+    "infra:profiles": "docker compose exec -T postgis psql --username benchmark --dbname benchmark --set ON_ERROR_STOP=1 --file /docker-entrypoint-initdb.d/002-spread-profiles.sql && docker compose restart martin",
+    "load": "docker compose --profile load run --rm k6 run /tests/martin.js",
+    "load:smoke": "docker compose --profile load run --rm -e K6_PROFILE=smoke k6 run /tests/martin.js",
+    "mapserver:up": "docker compose --profile mapserver up -d mapserver"
+  },
+  "dependencies": {
+    "maplibre-gl": "5.24.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "typescript": "7.0.2",
+    "vite": "8.1.5"
+  }
+}

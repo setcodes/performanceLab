@@ -1,0 +1,53 @@
+MAP
+  NAME "cpeit_benchmark"
+  STATUS ON
+  SIZE 1024 768
+  EXTENT 37.2 55.5 38.0 56.0
+  UNITS DD
+  IMAGETYPE PNG
+
+  PROJECTION
+    "init=epsg:4326"
+  END
+
+  WEB
+    METADATA
+      "ows_title" "ЦП ЕИТП MapServer benchmark"
+      "ows_enable_request" "*"
+      "ows_srs" "EPSG:4326 EPSG:3857"
+    END
+  END
+
+  OUTPUTFORMAT
+    NAME "png"
+    DRIVER AGG/PNG
+    MIMETYPE "image/png"
+    IMAGEMODE RGBA
+    EXTENSION "png"
+    TRANSPARENT ON
+  END
+
+  LAYER
+    NAME "points"
+    TYPE POINT
+    STATUS ON
+    CONNECTIONTYPE POSTGIS
+    CONNECTION "host=postgis port=5432 dbname=benchmark user=benchmark password=benchmark"
+    DATA "geom FROM benchmark.points USING UNIQUE id USING SRID=4326"
+    PROJECTION
+      "init=epsg:4326"
+    END
+    METADATA
+      "ows_title" "Benchmark points"
+      "ows_srs" "EPSG:4326 EPSG:3857"
+    END
+    CLASS
+      STYLE
+        COLOR 109 245 202
+        OUTLINECOLOR 7 16 24
+        SIZE 4
+      END
+    END
+  END
+END
+
