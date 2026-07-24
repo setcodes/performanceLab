@@ -4,6 +4,9 @@
 нагрузочной способности цепочки `MapLibre → Martin → PostGIS`. Это baseline-PoC:
 он не содержит корпоративный Map SDK и не изменяет проект ЦП ЕИТП.
 
+Статическая GeoJSON-версия: <https://setcodes.github.io/performanceLab/>.
+MVT доступен в Docker-версии, поскольку GitHub Pages не запускает Martin/PostGIS.
+
 ## Что измеряет стенд
 
 Браузерный контур независимо изменяет:
