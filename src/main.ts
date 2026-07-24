@@ -28,6 +28,23 @@ const SCORE_HISTORY_STORAGE_KEY = 'maplibre-performance-lab.score-history.v1';
 const CONFIGURED_MVT_BASE_URL = import.meta.env.VITE_MVT_BASE_URL?.replace(/\/$/, '') ?? '';
 const IS_LOCAL_HOST = ['localhost', '127.0.0.1'].includes(window.location.hostname);
 const MVT_BASE_URL = CONFIGURED_MVT_BASE_URL || (IS_LOCAL_HOST ? '/tiles' : '');
+const PENDING_RUN_STORAGE_KEY = 'maplibre-performance-lab.pending-run.v1';
+const INCIDENTS_STORAGE_KEY = 'maplibre-performance-lab.incidents.v1';
+
+interface RunIncident {
+  timestamp: string;
+  kind: 'interrupted' | 'error' | 'unhandled-rejection';
+  message: string;
+  runId: string | null;
+  config: Partial<BenchmarkConfig> | null;
+}
+
+interface PendingRun {
+  runId: string;
+  timestamp: string;
+  heartbeat: string;
+  config: BenchmarkConfig;
+}
 
 const defaults: BenchmarkConfig = {
   labMode: 'benchmark',
@@ -110,6 +127,52 @@ const initialConfig: BenchmarkConfig = {
     : defaults.spreadKm,
 };
 
+function settingTitle(label: string, explanation: string): string {
+  return `<span class="setting-label"><span>${escapeHtml(label)}</span><span class="setting-help" role="button" tabindex="0" aria-label="Справка: ${escapeHtml(label)}" data-setting-tooltip="${escapeHtml(explanation)}">?</span></span>`;
+}
+
+function loadRunIncidents(): RunIncident[] {
+  try {
+    const stored = JSON.parse(localStorage.getItem(INCIDENTS_STORAGE_KEY) ?? '[]') as RunIncident[];
+    return Array.isArray(stored) ? stored.slice(0, 30) : [];
+  } catch {
+    return [];
+  }
+}
+
+function appendRunIncident(incident: RunIncident): void {
+  try {
+    localStorage.setItem(INCIDENTS_STORAGE_KEY, JSON.stringify([incident, ...loadRunIncidents()].slice(0, 30)));
+  } catch {
+    // Диагностика не должна сама прерывать стенд при заполненном localStorage.
+  }
+}
+
+function readPendingRun(): PendingRun | null {
+  try {
+    return JSON.parse(localStorage.getItem(PENDING_RUN_STORAGE_KEY) ?? 'null') as PendingRun | null;
+  } catch {
+    return null;
+  }
+}
+
+function recoverInterruptedRun(): RunIncident | null {
+  const pending = readPendingRun();
+  if (!pending) return null;
+  const incident: RunIncident = {
+    timestamp: new Date().toISOString(),
+    kind: 'interrupted',
+    message: `Предыдущий ${pending.config.labMode === 'realtime' ? 'realtime-сеанс' : 'benchmark'} не завершился. Последний heartbeat: ${new Date(pending.heartbeat).toLocaleString('ru-RU')}. Возможна перезагрузка, закрытие вкладки или нехватка памяти.`,
+    runId: pending.runId,
+    config: pending.config,
+  };
+  appendRunIncident(incident);
+  localStorage.removeItem(PENDING_RUN_STORAGE_KEY);
+  return incident;
+}
+
+const recoveredIncident = recoverInterruptedRun();
+
 const root = document.querySelector<HTMLDivElement>('#app');
 if (!root) throw new Error('Не найден контейнер приложения');
 
@@ -122,7 +185,7 @@ root.innerHTML = `
     </header>
     <form id="benchmark-form">
       <div class="mode-switch">
-        <span class="field-label">Режим стенда</span>
+        ${settingTitle('Режим стенда', 'Benchmark выполняет один воспроизводимый pan/zoom и сохраняет результат. Realtime непрерывно показывает текущую нагрузку при ручных изменениях карты.')}
         <input name="labMode" id="lab-mode" type="hidden" value="benchmark" />
         <div class="mode-tabs" role="tablist" aria-label="Режим стенда">
           <button class="mode-tab" type="button" role="tab" data-lab-mode="benchmark" aria-selected="true">Benchmark</button>
@@ -130,7 +193,7 @@ root.innerHTML = `
         </div>
         <span class="field-hint" id="lab-mode-hint">Один воспроизводимый прогон с итоговым отчётом.</span>
       </div>
-      <label>Профиль нагрузки
+      <label>${settingTitle('Профиль нагрузки', 'Готовая комбинация геометрий, sources, style layers и сложности стилей. Пользовательский профиль позволяет менять каждый параметр вручную.')}
         <select name="profile" id="benchmark-profile">
           <option value="custom">Пользовательский</option>
           <option value="gost-optimized">ГОСТ · оптимизированный (3 / 30)</option>
@@ -140,13 +203,13 @@ root.innerHTML = `
         <span class="field-hint" id="profile-hint">Простой стиль без составных обозначений.</span>
       </label>
       <div class="settings-pair">
-        <label>Доставка
+        <label>${settingTitle('Доставка', 'GeoJSON целиком создаётся и обрабатывается в браузере. MVT загружает только нужные тайлы с сервера Martin и лучше имитирует большие пространственные наборы.')}
           <select name="mode">
             <option value="geojson">GeoJSON в браузере</option>
             <option value="mvt" ${MVT_BASE_URL ? '' : 'disabled'}>MVT через Martin${MVT_BASE_URL ? '' : ' · нужен сервер'}</option>
           </select>
         </label>
-        <label>Подложка
+        <label>${settingTitle('Подложка', 'OSM добавляет растровые сетевые запросы и отдельный source/layer. Режим без подложки изолирует нагрузку тестовых данных.')}
           <select name="basemap">
             <option value="osm">OpenStreetMap</option>
             <option value="none">Без подложки</option>
@@ -154,7 +217,7 @@ root.innerHTML = `
         </label>
       </div>
       <fieldset>
-        <legend>Геометрия</legend>
+        <legend>${settingTitle('Геометрия', 'Можно включить одновременно точки, линии и полигоны. Объём данных создаётся отдельно для каждого выбранного типа.')}</legend>
         <div class="geometry-checks">
           <label class="check"><input name="geometries" type="checkbox" value="points" checked /><span>Точки</span></label>
           <label class="check"><input name="geometries" type="checkbox" value="lines" /><span>Линии</span></label>
@@ -162,13 +225,13 @@ root.innerHTML = `
         </div>
       </fieldset>
       <div class="settings-pair">
-        <label>Распределение
+        <label>${settingTitle('Распределение', 'Общий набор: одни и те же объекты фильтруются несколькими style layers. По группам слоёв: каждому layer назначается собственная группа объектов; общий объём равен «объектов в слое × style layers».')}
           <select name="layerDataMode" id="layer-data-mode">
             <option value="shared">Общий набор</option>
             <option value="partitioned">По группам слоёв</option>
           </select>
         </label>
-        <label>Стилизация
+        <label>${settingTitle('Стилизация', 'Примитивы измеряют базовый рендер. ГОСТ proxy добавляет составные линии, символы, подписи и штриховки, приближая нагрузку к предметной карте.')}
           <select name="styleMode" id="style-mode">
             <option value="simple">Примитивы</option>
             <option value="gost">ГОСТ proxy</option>
@@ -176,47 +239,47 @@ root.innerHTML = `
         </label>
       </div>
       <div class="grid-two">
-        <label>Объектов на тип
+        <label>${settingTitle('Объектов на тип', 'Используется в режиме «Общий набор». Для каждой выбранной геометрии создаётся указанное количество уникальных объектов.')}
           <input name="featureCount" type="number" min="100" max="1000000" step="100" value="50000" />
         </label>
-        <label>Объектов в слое
-          <input name="objectsPerLayer" id="objects-per-layer" type="number" min="1" max="100000" step="100" value="1000" disabled />
+        <label>${settingTitle('Объектов в слое', 'Используется только при распределении «По группам слоёв». Каждый style layer получает эту величину; общий объём равен значению × количеству layers. Допустимо любое целое число, например ровно 1000.')}
+          <input name="objectsPerLayer" id="objects-per-layer" type="number" min="1" max="100000" step="1" value="1000" disabled />
         </label>
-        <label>Вершин/объект
+        <label>${settingTitle('Вершин/объект', 'Сложность линий и полигонов. Больше вершин увеличивает размер данных, подготовку геометрии и нагрузку рендера; для точек почти не влияет.')}
           <input name="verticesPerFeature" type="number" min="1" max="1000" value="8" />
         </label>
-        <label>Источники всего
+        <label>${settingTitle('Источники всего', 'Число тематических MapLibre sources без подложки. Один source может обслуживать несколько style layers; увеличение sources добавляет копии данных и служебные расходы.')}
           <input name="sourceCount" type="number" min="1" max="100" value="1" />
         </label>
-        <label>Style layers
+        <label>${settingTitle('Style layers', 'Количество правил отрисовки MapLibre. Это не папки бизнес-категорий: один объект может пройти через несколько layers и быть нарисован несколькими способами.')}
           <input name="layerCount" type="number" min="1" max="500" value="10" />
         </label>
-        <label>DPR рендера
+        <label>${settingTitle('DPR рендера', 'Множитель разрешения WebGL-буфера. DPR 2 создаёт примерно в 4 раза больше пикселей, чем DPR 1, и заметно увеличивает нагрузку GPU.')}
           <input name="pixelRatio" type="number" min="0.5" max="4" step="0.25" value="1" />
         </label>
       </div>
       <label class="check">
         <input name="collisionLayer" type="checkbox" />
-        <span>Слой столкновений подписей (icon proxy)</span>
+        ${settingTitle('Коллизии подписей', 'Добавляет symbol layer с проверкой пересечений. Имитирует размещение значков и подписей, которое часто является дорогой частью картографического рендера.')}
       </label>
       <div class="settings-triple benchmark-timing-row">
-        <label>Разброс
+        <label>${settingTitle('Разброс', 'Радиус размещения геометрии вокруг центра. При том же числе объектов меньший радиус повышает плотность и количество объектов, одновременно видимых на экране.')}
           <select name="spreadKm">
             <option value="3">Плотно · 3 км</option>
             <option value="30" selected>Город · 30 км</option>
             <option value="150">Регион · 150 км</option>
           </select>
         </label>
-        <label>Pan/zoom, мс
+        <label>${settingTitle('Pan/zoom, мс', 'Длительность автоматического движения камеры, во время которого измеряются FPS и время кадров. Более длинный прогон даёт устойчивее статистику.')}
           <input name="interactionMs" type="number" min="1000" max="30000" step="500" value="4000" />
         </label>
-        <label>Seed
+        <label>${settingTitle('Seed', 'Начальное число генератора данных. Одинаковый seed и одинаковые настройки создают одинаковую геометрию для честного сравнения прогонов.')}
           <input name="seed" type="number" value="42" />
         </label>
       </div>
       <div class="form-actions">
-        <button id="run-button" type="submit">Запустить измерение</button>
-        <button class="secondary" id="reset-settings-button" type="button">Сбросить настройки</button>
+        <button id="run-button" type="submit">Запустить тест</button>
+        <button class="secondary" id="reset-settings-button" type="button">Сбросить</button>
       </div>
       <section class="live-controls" id="live-controls" hidden>
         <h2>Изменение живой сцены</h2>
@@ -258,10 +321,10 @@ root.innerHTML = `
         </div>
       </section>
       <div class="report-actions">
-        <button class="secondary report-primary-action" id="view-report-button" type="button" disabled>Открыть накопительный отчёт</button>
+        <button class="secondary report-primary-action" id="view-report-button" type="button" disabled>Открыть отчёт</button>
         <button class="secondary" id="scoreboard-button" type="button" disabled>История запусков</button>
-        <button class="secondary" id="download-html-button" type="button" disabled>Скачать отчёт HTML</button>
-        <button class="secondary" id="download-button" type="button" disabled>Скачать данные JSON</button>
+        <button class="secondary" id="download-html-button" type="button" disabled>Скачать HTML</button>
+        <button class="secondary" id="download-button" type="button" disabled>Скачать JSON</button>
       </div>
     </div>
   </aside>
@@ -288,6 +351,7 @@ root.innerHTML = `
       <button class="secondary compact" id="clear-scoreboard-button" type="button">Очистить историю</button>
     </div>
   </dialog>
+  <div class="settings-tooltip" id="settings-tooltip" role="tooltip" hidden></div>
 `;
 
 const initialBasemap = initialConfig.basemap;
@@ -344,6 +408,87 @@ const scoreboardDialog = document.querySelector<HTMLDialogElement>('#scoreboard-
 const scoreboardContent = document.querySelector<HTMLDivElement>('#scoreboard-content')!;
 const closeScoreboardButton = document.querySelector<HTMLButtonElement>('#close-scoreboard-button')!;
 const clearScoreboardButton = document.querySelector<HTMLButtonElement>('#clear-scoreboard-button')!;
+const settingsTooltip = document.querySelector<HTMLDivElement>('#settings-tooltip')!;
+
+let pendingRunHeartbeat: number | null = null;
+
+function showSettingTooltip(target: HTMLElement): void {
+  const message = target.dataset.settingTooltip;
+  if (!message) return;
+  settingsTooltip.textContent = message;
+  settingsTooltip.hidden = false;
+  const targetRect = target.getBoundingClientRect();
+  const tooltipRect = settingsTooltip.getBoundingClientRect();
+  const left = Math.min(window.innerWidth - tooltipRect.width - 10, Math.max(10, targetRect.left - 8));
+  const below = targetRect.bottom + 8;
+  const top = below + tooltipRect.height <= window.innerHeight - 10
+    ? below
+    : Math.max(10, targetRect.top - tooltipRect.height - 8);
+  settingsTooltip.style.left = `${left}px`;
+  settingsTooltip.style.top = `${top}px`;
+}
+
+function hideSettingTooltip(): void {
+  settingsTooltip.hidden = true;
+}
+
+for (const help of document.querySelectorAll<HTMLElement>('.setting-help')) {
+  help.addEventListener('pointerenter', () => showSettingTooltip(help));
+  help.addEventListener('pointerleave', hideSettingTooltip);
+  help.addEventListener('focus', () => showSettingTooltip(help));
+  help.addEventListener('blur', hideSettingTooltip);
+  help.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    showSettingTooltip(help);
+  });
+}
+
+function beginRunTracking(runId: string, config: BenchmarkConfig): void {
+  const writeHeartbeat = () => {
+    const value: PendingRun = {
+      runId,
+      timestamp: readPendingRun()?.timestamp ?? new Date().toISOString(),
+      heartbeat: new Date().toISOString(),
+      config,
+    };
+    try {
+      localStorage.setItem(PENDING_RUN_STORAGE_KEY, JSON.stringify(value));
+    } catch {
+      // Основной benchmark продолжает работу, даже если диагностика недоступна.
+    }
+  };
+  writeHeartbeat();
+  pendingRunHeartbeat = window.setInterval(writeHeartbeat, 1_000);
+}
+
+function finishRunTracking(): void {
+  if (pendingRunHeartbeat !== null) window.clearInterval(pendingRunHeartbeat);
+  pendingRunHeartbeat = null;
+  localStorage.removeItem(PENDING_RUN_STORAGE_KEY);
+}
+
+window.addEventListener('error', (event) => {
+  const pending = readPendingRun();
+  appendRunIncident({
+    timestamp: new Date().toISOString(),
+    kind: 'error',
+    message: event.error instanceof Error ? event.error.stack ?? event.error.message : event.message,
+    runId: pending?.runId ?? null,
+    config: pending?.config ?? null,
+  });
+});
+
+window.addEventListener('unhandledrejection', (event) => {
+  const pending = readPendingRun();
+  appendRunIncident({
+    timestamp: new Date().toISOString(),
+    kind: 'unhandled-rejection',
+    message: event.reason instanceof Error ? event.reason.stack ?? event.reason.message : String(event.reason),
+    runId: pending?.runId ?? null,
+    config: pending?.config ?? null,
+  });
+});
 
 interface RealtimeMonitorState {
   active: boolean;
@@ -1229,6 +1374,7 @@ function stopRealtimeMonitoring(updateStatus = true): void {
   realtimeMonitor.interval = null;
   realtimeMonitor.observer = null;
   realtimeMonitor.lastFrameAt = null;
+  if (readPendingRun()?.config.labMode === 'realtime') finishRunTracking();
   stopLiveButton.disabled = true;
   if (labMode.value === 'realtime') runButton.textContent = 'Запустить realtime';
   if (updateStatus) {
@@ -1262,6 +1408,8 @@ async function startRealtime(partial: Partial<BenchmarkConfig> = {}): Promise<vo
   const config = resolveConfig({...partial, labMode: 'realtime'});
   if (config.geometries.length === 0) throw new Error('Выберите хотя бы один тип геометрии');
   stopRealtimeMonitoring(false);
+  const runId = crypto.randomUUID();
+  beginRunTracking(runId, config);
   setStatus('Перестроение realtime-сцены…', true);
   try {
     await waitForMapReady();
@@ -1277,6 +1425,14 @@ async function startRealtime(partial: Partial<BenchmarkConfig> = {}): Promise<vo
     mapBadge.textContent = 'realtime · live';
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    appendRunIncident({
+      timestamp: new Date().toISOString(),
+      kind: 'error',
+      message,
+      runId,
+      config,
+    });
+    finishRunTracking();
     setStatus(`Ошибка realtime: ${message}`);
     throw error;
   }
@@ -1292,6 +1448,8 @@ async function runBenchmark(partial: Partial<BenchmarkConfig> = {}): Promise<Ben
   if (config.mode === 'geojson' && config.layerDataMode === 'partitioned' && config.objectsPerLayer * config.layerCount > 2_000_000) {
     throw new Error('Для GeoJSON ограничьте общий набор двумя миллионами объектов или используйте MVT');
   }
+  const runId = crypto.randomUUID();
+  beginRunTracking(runId, config);
   const errors: string[] = [];
   const longTasks: number[] = [];
   const resourceBefore = resourceSnapshot();
@@ -1354,7 +1512,7 @@ async function runBenchmark(partial: Partial<BenchmarkConfig> = {}): Promise<Ben
 
     lastResult = {
       schemaVersion: 6,
-      runId: crypto.randomUUID(),
+      runId,
       timestamp: new Date().toISOString(),
       config,
       environment: {
@@ -1416,9 +1574,17 @@ async function runBenchmark(partial: Partial<BenchmarkConfig> = {}): Promise<Ben
     return lastResult;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    appendRunIncident({
+      timestamp: new Date().toISOString(),
+      kind: 'error',
+      message,
+      runId,
+      config,
+    });
     setStatus(`Ошибка: ${message}`);
     throw error;
   } finally {
+    finishRunTracking();
     observer?.disconnect();
     map.off('error', errorHandler);
   }
@@ -1476,11 +1642,12 @@ function loadScoreHistory(): BenchmarkResult[] {
 
 function updateScoreboardButton(): void {
   const empty = scoreHistory.length === 0;
+  const hasReportData = !empty || loadRunIncidents().length > 0;
   scoreboardButton.disabled = empty;
-  viewReportButton.disabled = empty;
-  downloadButton.disabled = empty;
-  downloadHtmlButton.disabled = empty;
-  scoreboardButton.textContent = scoreHistory.length > 0 ? `История запусков · ${scoreHistory.length}` : 'История запусков';
+  viewReportButton.disabled = !hasReportData;
+  downloadButton.disabled = !hasReportData;
+  downloadHtmlButton.disabled = !hasReportData;
+  scoreboardButton.textContent = scoreHistory.length > 0 ? `История · ${scoreHistory.length}` : 'История';
 }
 
 function storeScoreResult(result: BenchmarkResult): void {
@@ -1723,7 +1890,20 @@ function singleRunReportContent(result: BenchmarkResult): string {
 }
 
 function cumulativeReportContent(history: BenchmarkResult[]): string {
-  if (history.length === 0) return '<div class="score-empty">Сначала выполните Benchmark.</div>';
+  const incidents = loadRunIncidents();
+  const incidentRows = incidents.map((incident) => `
+    <tr>
+      <td>${new Date(incident.timestamp).toLocaleString('ru-RU')}</td>
+      <td>${incident.kind}</td>
+      <td>${escapeHtml(incident.runId ?? '—')}</td>
+      <td>${escapeHtml(incident.message)}</td>
+    </tr>
+  `).join('');
+  if (history.length === 0) {
+    return incidents.length > 0
+      ? `<section class="report-section"><h3>Ошибки и прерванные запуски · ${incidents.length}</h3><p class="report-conclusion">Успешных результатов пока нет. Прерванный запуск может означать перезагрузку, закрытие вкладки, сбой WebGL или нехватку памяти.</p><div class="report-table-wrap"><table class="score-table"><thead><tr><th>Дата</th><th>Тип</th><th>Run ID</th><th>Сообщение</th></tr></thead><tbody>${incidentRows}</tbody></table></div></section>`
+      : '<div class="score-empty">Сначала выполните Benchmark.</div>';
+  }
   const latest = history[0];
   const rows = history.map((run, index) => {
     const verdict = verdictFor(run);
@@ -1736,6 +1916,9 @@ function cumulativeReportContent(history: BenchmarkResult[]): string {
       <div><span>Последний сценарий</span><strong>${latest.config.mode.toUpperCase()} · ${latest.workload.benchmarkSources}/${latest.workload.benchmarkLayers}</strong></div>
     </section>
     <section class="report-section"><h3>Сравнение всех запусков</h3><div class="report-table-wrap"><table class="score-table"><thead><tr><th>Дата</th><th>Доставка</th><th>Профиль</th><th>На экране</th><th>Sources / layers</th><th>FPS</th><th>p95</th><th>Score</th><th>Итог</th></tr></thead><tbody>${rows}</tbody></table></div></section>
+    <section class="report-section"><h3>Ошибки и прерванные запуски · ${incidents.length}</h3>${incidents.length > 0
+      ? `<p class="report-conclusion">Прерванный запуск означает, что был записан старт и heartbeat, но страница не успела записать результат. Возможные причины: перезагрузка, закрытие вкладки, сбой WebGL или нехватка памяти.</p><div class="report-table-wrap"><table class="score-table"><thead><tr><th>Дата</th><th>Тип</th><th>Run ID</th><th>Сообщение</th></tr></thead><tbody>${incidentRows}</tbody></table></div>`
+      : '<p class="scoreboard-note">Зафиксированных ошибок и незавершённых benchmark-запусков нет.</p>'}</section>
     <section class="report-run"><h2>Последний запуск</h2>${singleRunReportContent(latest)}</section>
     ${history.slice(1).map((run, index) => `<details class="report-run"><summary>${history.length - index - 1}. ${new Date(run.timestamp).toLocaleString('ru-RU')} · ${run.config.mode.toUpperCase()} · score ${run.score.total}</summary>${singleRunReportContent(run)}</details>`).join('')}
   `;
@@ -1753,6 +1936,7 @@ function cumulativeReportData(history: BenchmarkResult[]): object {
     generatedAt: new Date().toISOString(),
     description: 'Накопительный отчёт MapLibre Performance Lab. Сравнивать score следует только у одинаковых scenarioKey.',
     limitations: ['Браузер не предоставляет точную загрузку CPU/GPU в процентах.', 'Класс устройства является эвристической оценкой.'],
+    incidents: loadRunIncidents(),
     runs: history,
   };
 }
@@ -1850,7 +2034,7 @@ function updateLabMode(mode: BenchmarkConfig['labMode']): void {
     tab.setAttribute('aria-selected', String(tab.dataset.labMode === mode));
   }
   liveControls.hidden = !realtime;
-  runButton.textContent = realtime ? 'Запустить realtime' : 'Запустить измерение';
+  runButton.textContent = realtime ? 'Запустить realtime' : 'Запустить тест';
   labModeHint.textContent = realtime
     ? 'Непрерывные метрики при изменении сцены и движении карты.'
     : 'Один воспроизводимый прогон с итоговым отчётом.';
@@ -1974,17 +2158,17 @@ toggleLiveStyleButton.addEventListener('click', () => {
 stopLiveButton.addEventListener('click', () => stopRealtimeMonitoring());
 
 downloadButton.addEventListener('click', () => {
-  if (scoreHistory.length === 0) return;
+  if (scoreHistory.length === 0 && loadRunIncidents().length === 0) return;
   downloadTextFile(JSON.stringify(cumulativeReportData(scoreHistory), null, 2), `maplibre-benchmark-history-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
 });
 
 downloadHtmlButton.addEventListener('click', () => {
-  if (scoreHistory.length === 0) return;
+  if (scoreHistory.length === 0 && loadRunIncidents().length === 0) return;
   downloadTextFile(cumulativeReportDocument(scoreHistory), `maplibre-benchmark-report-${new Date().toISOString().slice(0, 10)}.html`, 'text/html');
 });
 
 viewReportButton.addEventListener('click', () => {
-  if (scoreHistory.length === 0) return;
+  if (scoreHistory.length === 0 && loadRunIncidents().length === 0) return;
   reportDialogContent.innerHTML = cumulativeReportContent(scoreHistory);
   reportDialog.showModal();
 });
@@ -2001,6 +2185,8 @@ closeScoreboardButton.addEventListener('click', () => scoreboardDialog.close());
 clearScoreboardButton.addEventListener('click', () => {
   scoreHistory = [];
   localStorage.removeItem(SCORE_HISTORY_STORAGE_KEY);
+  localStorage.removeItem(INCIDENTS_STORAGE_KEY);
+  localStorage.removeItem(PENDING_RUN_STORAGE_KEY);
   updateScoreboardButton();
   renderScoreboard();
 });
@@ -2008,7 +2194,11 @@ clearScoreboardButton.addEventListener('click', () => {
 scoreHistory = loadScoreHistory();
 updateScoreboardButton();
 
-map.on('load', () => setStatus('Карта готова к запуску.'));
+map.on('load', () => {
+  setStatus(recoveredIncident
+    ? 'Предыдущий тест завершился аварийно или был прерван. Инцидент добавлен в накопительный отчёт.'
+    : 'Карта готова к запуску.');
+});
 
 window.benchmarkApi = {
   run: runBenchmark,

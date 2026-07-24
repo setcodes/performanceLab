@@ -62,6 +62,46 @@ test('settings persist and result panel collapses', async ({page}) => {
   await expect(page.locator('#app')).toHaveClass(/results-collapsed/);
 });
 
+test('setting tooltips explain inputs and partitioned count accepts exactly 1000', async ({page}) => {
+  await page.selectOption('#layer-data-mode', 'partitioned');
+  const objectsPerLayer = page.locator('#objects-per-layer');
+  await expect(objectsPerLayer).toBeEnabled();
+  await expect(objectsPerLayer).toHaveAttribute('step', '1');
+  await objectsPerLayer.fill('1000');
+  expect(await objectsPerLayer.evaluate((input: HTMLInputElement) => input.checkValidity())).toBe(true);
+
+  const distributionHelp = page.getByRole('button', {name: 'Справка: Распределение'});
+  await expect(distributionHelp).not.toHaveAttribute('title', /.+/);
+  await distributionHelp.hover();
+  await expect(page.locator('#settings-tooltip')).toBeVisible();
+  await expect(page.locator('#settings-tooltip')).toContainText('объектов в слое × style layers');
+
+  const labelledControls = page.locator('#benchmark-form label:has(input:not([type="checkbox"]), select)');
+  await expect(labelledControls).toHaveCount(14);
+  for (const label of await labelledControls.all()) {
+    await expect(label.locator('.setting-help')).toHaveCount(1);
+  }
+});
+
+test('interrupted benchmark is recovered into incident report', async ({page}) => {
+  await page.evaluate(() => {
+    localStorage.clear();
+    localStorage.setItem('maplibre-performance-lab.pending-run.v1', JSON.stringify({
+      runId: 'interrupted-test-run',
+      timestamp: new Date(Date.now() - 5_000).toISOString(),
+      heartbeat: new Date(Date.now() - 1_000).toISOString(),
+      config: {},
+    }));
+  });
+  await page.reload();
+  await expect(page.locator('#status')).toContainText('тест завершился аварийно или был прерван');
+  await expect(page.locator('#view-report-button')).toBeEnabled();
+  await page.locator('#view-report-button').click();
+  await expect(page.locator('#report-dialog')).toBeVisible();
+  await expect(page.locator('#report-dialog-content')).toContainText('interrupted-test-run');
+  await expect(page.locator('#report-dialog-content')).toContainText('не завершился');
+});
+
 for (const scenario of scenarios) {
   test(scenario.name, async ({page}, testInfo) => {
     const result = await page.evaluate(async (input) => {
