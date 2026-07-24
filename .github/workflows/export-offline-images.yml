@@ -1,0 +1,68 @@
+name: Export offline Docker images
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: GitHub Release tag receiving the archives
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: write
+  packages: read
+
+env:
+  WEB_IMAGE: ghcr.io/setcodes/performancelab-web:latest
+  MARTIN_IMAGE: ghcr.io/setcodes/performancelab-martin:1.3.1
+  POSTGIS_IMAGE: ghcr.io/setcodes/performancelab-postgis:17-3.5
+  RELEASE_TAG: ${{ inputs.release_tag }}
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release when missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --target "${GITHUB_SHA}" \
+              --title "MapLibre Performance Lab ${RELEASE_TAG}" \
+              --notes "Offline Docker image archives for reproducible amd64 and arm64 launches."
+          fi
+
+  export-images:
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Pull application images for ${{ matrix.arch }}
+        run: |
+          docker pull --platform "linux/${{ matrix.arch }}" "${WEB_IMAGE}"
+          docker pull --platform "linux/${{ matrix.arch }}" "${MARTIN_IMAGE}"
+          docker pull --platform linux/amd64 "${POSTGIS_IMAGE}"
+
+      - name: Export docker-load archive
+        run: |
+          archive="performance-lab-images-${{ matrix.arch }}.tar.gz"
+          docker save "${WEB_IMAGE}" "${MARTIN_IMAGE}" "${POSTGIS_IMAGE}" \
+            | gzip -9 > "${archive}"
+          sha256sum "${archive}" > "${archive}.sha256"
+
+      - name: Upload archive to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          archive="performance-lab-images-${{ matrix.arch }}.tar.gz"
+          gh release upload "${RELEASE_TAG}" \
+            "${archive}" "${archive}.sha256" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+

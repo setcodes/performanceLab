@@ -110,6 +110,33 @@ docker compose up -d --wait
 Команда с `-v` удаляет только volume этого compose-проекта и все находящиеся в
 нём тестовые данные.
 
+### Запуск без доступа к registry
+
+Готовые архивы всех необходимых образов опубликованы в
+[GitHub Releases](https://github.com/setcodes/performanceLab/releases).
+Выберите архив по архитектуре компьютера:
+
+- `performance-lab-images-amd64.tar.gz` — Intel/AMD;
+- `performance-lab-images-arm64.tar.gz` — Apple Silicon и ARM64 Linux.
+
+PostGIS внутри ARM64-архива остаётся `linux/amd64` и запускается через эмуляцию,
+как указано в `compose.yaml`, потому что зафиксированный образ PostGIS не содержит
+нативного ARM64 manifest.
+
+На компьютере с интернетом скачайте архив и репозиторий. Перенесите их на целевой
+компьютер, затем выполните:
+
+```bash
+gzip -dc performance-lab-images-arm64.tar.gz | docker load
+cd performanceLab
+docker compose up -d --pull never --wait
+```
+
+Для Intel/AMD замените имя архива на `performance-lab-images-amd64.tar.gz`.
+После `docker load` интернет для запуска контейнеров не требуется. SQL-схема и
+детерминированные сиды берутся из клонированного репозитория и автоматически
+создают тестовую БД при первом запуске.
+
 В публикации через Codex Sites режим GeoJSON работает автономно. Для MVT нужен
 отдельно опубликованный Martin/PostGIS; его адрес передаётся на этапе сборки
 через `VITE_MVT_BASE_URL`.
