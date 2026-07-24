@@ -797,17 +797,38 @@ async function addScenario(config: BenchmarkConfig, datasets: Map<GeometryKind, 
   ensureCollisionImage();
   if (config.styleMode === 'gost') ensureGostImages();
 
-  const tileManifests = new Map<GeometryKind, {url: string; vectorLayerId: string}>();
+  const tileManifests = new Map<GeometryKind, {tiles: string[]; vectorLayerId: string}>();
   if (config.mode === 'mvt') {
     if (!MVT_BASE_URL) throw new Error('MVT недоступен: для публичной версии не настроен адрес Martin');
     await Promise.all(config.geometries.map(async (geometry) => {
       const url = `${MVT_BASE_URL}/${geometry}_r${config.spreadKm}`;
       const response = await fetch(url);
       if (!response.ok) throw new Error(`Martin TileJSON вернул ${response.status}: ${url}`);
-      const manifest = (await response.json()) as {vector_layers?: Array<{id: string}>};
+      const manifest = (await response.json()) as {
+        tiles?: string[];
+        vector_layers?: Array<{id: string}>;
+      };
       const vectorLayerId = manifest.vector_layers?.[0]?.id;
       if (!vectorLayerId) throw new Error(`Martin TileJSON ${url} не содержит vector_layers[0].id`);
-      tileManifests.set(geometry, {url, vectorLayerId});
+      if (!manifest.tiles?.length) throw new Error(`Martin TileJSON ${url} не содержит tiles`);
+
+      const tiles = manifest.tiles.map((rawTileUrl) => {
+        const tileUrl = new URL(rawTileUrl, window.location.href);
+        const preserveTemplate = (value: string) => value.replace(/%7B([^%]+)%7D/gi, '{$1}');
+
+        if (MVT_BASE_URL.startsWith('/')) {
+          return preserveTemplate(
+            new URL(`${tileUrl.pathname}${tileUrl.search}${tileUrl.hash}`, window.location.origin).toString(),
+          );
+        }
+
+        if (window.location.protocol === 'https:' && tileUrl.protocol === 'http:') {
+          tileUrl.protocol = 'https:';
+        }
+        return preserveTemplate(tileUrl.toString());
+      });
+
+      tileManifests.set(geometry, {tiles, vectorLayerId});
     }));
   }
 
@@ -824,7 +845,7 @@ async function addScenario(config: BenchmarkConfig, datasets: Map<GeometryKind, 
         });
       } else {
         const tileManifest = tileManifests.get(geometry)!;
-        map.addSource(id, {type: 'vector', url: tileManifest.url});
+        map.addSource(id, {type: 'vector', tiles: tileManifest.tiles});
       }
       activeSourceIds.push(id);
       sources.push({id, geometry, vectorLayerId: tileManifests.get(geometry)?.vectorLayerId});
