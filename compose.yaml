@@ -1,6 +1,17 @@
 name: cpeit-map-performance-lab
 
 services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${WEB_PORT:-4173}:4173"
+    depends_on:
+      martin:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgis:
     image: postgis/postgis:17-3.5
     # Official PostGIS images are amd64-only for this pinned tag; Docker Desktop
@@ -29,6 +40,12 @@ services:
     depends_on:
       postgis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/catalog"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
     restart: unless-stopped
 
   k6:

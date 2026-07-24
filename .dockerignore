@@ -1,0 +1,11 @@
+.git
+.openai
+node_modules
+dist
+playwright-report
+test-results
+results/raw
+results/reports
+.DS_Store
+.env
+

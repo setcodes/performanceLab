@@ -46,6 +46,54 @@ npm run report
 формы сохраняются в `localStorage`. Кнопка «Сбросить настройки» возвращает
 исходную конфигурацию и удаляет сохранённые значения.
 
+## Весь стенд одной командой
+
+Требуется только Docker с поддержкой Compose (Docker Desktop, OrbStack или
+совместимый Docker Engine). Node.js и локально установленный PostgreSQL не нужны.
+
+```bash
+git clone https://github.com/setcodes/performanceLab.git
+cd performanceLab
+docker compose up -d --build --wait
+```
+
+После запуска откройте <http://localhost:4173>. В контейнерах автоматически
+поднимаются:
+
+- production-сборка интерфейса с reverse proxy `/tiles`;
+- Martin на <http://localhost:3000>;
+- PostgreSQL 17 с PostGIS 3.5;
+- детерминированные тестовые данные и профили разброса 3, 30 и 150 км.
+
+Первый запуск дольше последующих: PostGIS выполняет SQL из
+`infra/postgis/init/` и создаёт 250 000 точек, 50 000 линий и 10 000 полигонов
+для основной выборки и каждого из трёх профилей разброса. Данные сохраняются в
+именованном Docker volume и повторно не генерируются при обычном перезапуске.
+
+Управление стендом:
+
+```bash
+docker compose ps
+docker compose logs -f web martin postgis
+docker compose down
+```
+
+Порт интерфейса можно изменить:
+
+```bash
+WEB_PORT=8088 docker compose up -d --build --wait
+```
+
+Полностью пересоздать БД и повторить начальное заполнение:
+
+```bash
+docker compose down -v
+docker compose up -d --build --wait
+```
+
+Команда с `-v` удаляет только volume этого compose-проекта и все находящиеся в
+нём тестовые данные.
+
 В публикации через Codex Sites режим GeoJSON работает автономно. Для MVT нужен
 отдельно опубликованный Martin/PostGIS; его адрес передаётся на этапе сборки
 через `VITE_MVT_BASE_URL`.
@@ -132,9 +180,10 @@ raster style layer. Профили не переключают способ до
 Отчёт создаётся в `results/reports/index.html`, сырые результаты — в
 `results/raw/`.
 
-## Полный MVT-контур
+## Полный MVT-контур для разработки и тестов
 
-Требуется Docker Desktop с Docker Compose.
+Для запуска интерфейса через локальный Vite и выполнения тестовой матрицы
+требуются Node.js 22.12+ и Docker Compose.
 
 ```bash
 npm run infra:up
