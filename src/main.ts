@@ -13,6 +13,7 @@ import type {
   BenchmarkConfig,
   BenchmarkProfile,
   BenchmarkResult,
+  BenchmarkScreenshot,
   BenchmarkScore,
   GeneratedDataset,
   GeometryKind,
@@ -242,7 +243,7 @@ root.innerHTML = `
     <div class="result-header">
       <div class="result-heading">
         <p class="eyebrow">Результат</p>
-        <h2>Статистика прогона</h2>
+        <h2>Итог нагрузки</h2>
       </div>
       <button class="panel-toggle" id="result-panel-toggle" type="button" aria-label="Свернуть результаты" title="Свернуть результаты">
         <span aria-hidden="true">›</span>
@@ -257,18 +258,18 @@ root.innerHTML = `
         </div>
       </section>
       <div class="report-actions">
-        <button class="secondary" id="scoreboard-button" type="button" disabled>Скоринг</button>
-        <button class="secondary" id="view-report-button" type="button" disabled>Открыть отчёт</button>
-        <button class="secondary" id="download-button" type="button" disabled>Скачать JSON</button>
-        <button class="secondary" id="download-html-button" type="button" disabled>Скачать HTML</button>
+        <button class="secondary report-primary-action" id="view-report-button" type="button" disabled>Открыть накопительный отчёт</button>
+        <button class="secondary" id="scoreboard-button" type="button" disabled>История запусков</button>
+        <button class="secondary" id="download-html-button" type="button" disabled>Скачать отчёт HTML</button>
+        <button class="secondary" id="download-button" type="button" disabled>Скачать данные JSON</button>
       </div>
     </div>
   </aside>
   <dialog class="report-dialog" id="report-dialog">
     <div class="report-dialog-header">
       <div>
-        <p class="eyebrow">Benchmark report</p>
-        <h2>Результат измерения</h2>
+        <p class="eyebrow">Cumulative benchmark report</p>
+        <h2>Накопительный отчёт</h2>
       </div>
       <button class="secondary compact" id="close-report-button" type="button">Закрыть</button>
     </div>
@@ -895,7 +896,7 @@ async function addScenario(config: BenchmarkConfig, datasets: Map<GeometryKind, 
   }
 }
 
-async function animateCamera(durationMs: number): Promise<void> {
+async function animateCamera(durationMs: number, onMidpoint?: () => Promise<void>): Promise<void> {
   const legs = 4;
   const legMs = durationMs / legs;
   const targets: Array<{center: [number, number]; zoom: number}> = [
@@ -904,9 +905,10 @@ async function animateCamera(durationMs: number): Promise<void> {
     {center: [37.57, 55.92], zoom: 9.8},
     {center: [37.62, 55.75], zoom: 9.5},
   ];
-  for (const target of targets) {
+  for (const [index, target] of targets.entries()) {
     map.easeTo({...target, duration: legMs, easing: (value) => value});
     await new Promise((resolve) => window.setTimeout(resolve, legMs));
+    if (index === 1 && onMidpoint) await onMidpoint();
   }
 }
 
@@ -985,6 +987,63 @@ function calculateWorkload(config: BenchmarkConfig): BenchmarkResult['workload']
     totalStyleLayers: map.getStyle().layers.length,
     layerTypes,
   };
+}
+
+function visibleFeatureCounts(): {visibleUniqueFeatures: number; visibleFeatureLayerHits: number} {
+  const rendered = activeLayerIds.length > 0 ? map.queryRenderedFeatures({layers: activeLayerIds}) : [];
+  const uniqueFeatures = new Set<string>();
+  const featureLayerHits = new Set<string>();
+  for (const feature of rendered) {
+    const geometry = /^benchmark-source-(points|lines|polygons)-/.exec(feature.source)?.[1]
+      ?? feature.sourceLayer
+      ?? feature.source;
+    const featureId = feature.id ?? feature.properties?.id ?? JSON.stringify(feature.geometry);
+    const featureKey = `${geometry}:${String(featureId)}`;
+    uniqueFeatures.add(featureKey);
+    featureLayerHits.add(`${feature.layer.id}:${featureKey}`);
+  }
+  return {visibleUniqueFeatures: uniqueFeatures.size, visibleFeatureLayerHits: featureLayerHits.size};
+}
+
+async function captureMapSnapshot(
+  stage: BenchmarkScreenshot['stage'],
+  label: string,
+  startedAt: number,
+): Promise<BenchmarkScreenshot> {
+  const counts = visibleFeatureCounts();
+  const base = {
+    stage,
+    label,
+    elapsedMs: Math.round(performance.now() - startedAt),
+    ...counts,
+    zoom: Number(map.getZoom().toFixed(2)),
+  };
+  try {
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const timeout = window.setTimeout(() => reject(new Error('Тайм-аут снимка карты')), 3_000);
+      map.once('render', () => {
+        window.clearTimeout(timeout);
+        try {
+          const source = map.getCanvas();
+          const width = 480;
+          const height = Math.max(240, Math.round(width * source.clientHeight / Math.max(1, source.clientWidth)));
+          const thumbnail = document.createElement('canvas');
+          thumbnail.width = width;
+          thumbnail.height = height;
+          const context = thumbnail.getContext('2d');
+          if (!context) throw new Error('Canvas 2D недоступен');
+          context.drawImage(source, 0, 0, width, height);
+          resolve(thumbnail.toDataURL('image/webp', 0.62));
+        } catch (error) {
+          reject(error);
+        }
+      });
+      map.triggerRepaint();
+    });
+    return {...base, dataUrl, error: null};
+  } catch (error) {
+    return {...base, dataUrl: null, error: error instanceof Error ? error.message : String(error)};
+  }
 }
 
 function resolveConfig(partial: Partial<BenchmarkConfig>): BenchmarkConfig {
@@ -1111,38 +1170,43 @@ function renderRealtimeMetrics(): void {
   ]);
 
   if (!metricsElement.querySelector('.realtime-metrics')) {
+    const realtimeDevice = deviceAssessment({
+      environment: {
+        userAgent: navigator.userAgent,
+        viewport: {width: window.innerWidth, height: window.innerHeight, dpr: map.getPixelRatio()},
+        hardwareConcurrency: navigator.hardwareConcurrency || null,
+        deviceMemoryGb: (navigator as Navigator & {deviceMemory?: number}).deviceMemory ?? null,
+        renderer: getRenderer(gl),
+      },
+    });
     metricsElement.innerHTML = `
       <div class="realtime-metrics">
-        <h3>Realtime · кадр</h3>
+        <h3>Плавность сейчас</h3>
         <dl>
           ${metricCell('FPS rolling', values.get('FPS rolling')!)}
           ${metricCell('Frame p95', values.get('Frame p95')!)}
-          ${metricCell('Кадров в окне', values.get('Кадров в окне')!)}
           ${metricCell('Long tasks', values.get('Long tasks')!)}
         </dl>
-        <h3>Состав экрана</h3>
+        <h3>Что реально на экране</h3>
         <dl>
           ${metricCell('Видимых объектов', values.get('Видимых объектов')!)}
           ${metricCell('Попаданий в layers', values.get('Попаданий в layers')!)}
           ${metricCell('Объектов в сцене', values.get('Объектов в сцене')!)}
-          ${metricCell('Zoom', values.get('Zoom')!)}
           ${metricCell('Тематических sources', values.get('Тематических sources')!)}
           ${metricCell('Тестовых layers', values.get('Тестовых layers')!)}
-          ${metricCell('Экран карты', values.get('Экран карты')!)}
           ${metricCell('Буфер рендера', values.get('Буфер рендера')!)}
           ${metricCell('DPR рендера', values.get('DPR рендера')!)}
-          ${metricCell('DPR устройства', values.get('DPR устройства')!)}
-          ${metricCell('Радиус разброса', values.get('Радиус разброса')!)}
-          ${metricCell('Плотность сцены', values.get('Плотность сцены')!)}
         </dl>
-        <h3>Браузер и железо</h3>
+        <h3>Память и данные</h3>
         <dl>
           ${metricCell('JS heap', values.get('JS heap')!)}
-          ${metricCell('Логических CPU', values.get('Логических CPU')!)}
-          ${metricCell('Device memory', values.get('Device memory')!)}
           ${metricCell('Network', values.get('Network')!)}
         </dl>
-        <p class="metric-note">${getRenderer(gl) ?? 'WebGL renderer недоступен'}</p>
+        <section class="device-summary">
+          <strong>${realtimeDevice.label}</strong>
+          <span>${escapeHtml(realtimeDevice.detail)}</span>
+          <small>${escapeHtml(getRenderer(gl) ?? 'WebGL renderer недоступен')}</small>
+        </section>
         <p class="metric-note">Точный процент загрузки CPU/GPU браузер не предоставляет; FPS, frame time, long tasks и JS heap используются как клиентские индикаторы нагрузки.</p>
       </div>
     `;
@@ -1234,6 +1298,7 @@ async function runBenchmark(partial: Partial<BenchmarkConfig> = {}): Promise<Ben
   const started = performance.now();
   let generationMs = 0;
   let datasets = new Map<GeometryKind, GeneratedDataset>();
+  const screenshots: BenchmarkScreenshot[] = [];
 
   setStatus('Подготовка набора данных…', true);
   const errorHandler = (event: ErrorEvent | MapStyleImageMissingEvent) => {
@@ -1268,14 +1333,18 @@ async function runBenchmark(partial: Partial<BenchmarkConfig> = {}): Promise<Ben
     const idleStarted = performance.now();
     await waitForMapEvent('idle');
     const idleMs = performance.now() - idleStarted;
+    screenshots.push(await captureMapSnapshot('scene-ready', 'Сцена готова до движения', started));
 
     setStatus('Измерение pan/zoom и времени кадров…', true);
     const interactionStarted = performance.now();
     const [frames] = await Promise.all([
       sampleFrames(config.interactionMs),
-      animateCamera(config.interactionMs),
+      animateCamera(config.interactionMs, async () => {
+        screenshots.push(await captureMapSnapshot('interaction-mid', 'Середина pan/zoom', started));
+      }),
     ]);
     const interactionMs = performance.now() - interactionStarted;
+    screenshots.push(await captureMapSnapshot('completed', 'Финальное состояние карты', started));
     const resourceAfter = resourceSnapshot();
     const canvas = map.getCanvas();
     const gl = canvas.getContext('webgl2') ?? canvas.getContext('webgl');
@@ -1284,7 +1353,7 @@ async function runBenchmark(partial: Partial<BenchmarkConfig> = {}): Promise<Ben
     };
 
     lastResult = {
-      schemaVersion: 5,
+      schemaVersion: 6,
       runId: crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       config,
@@ -1318,9 +1387,20 @@ async function runBenchmark(partial: Partial<BenchmarkConfig> = {}): Promise<Ben
         usedJsHeapBytes: memory.memory?.usedJSHeapSize ?? null,
         totalJsHeapBytes: memory.memory?.totalJSHeapSize ?? null,
       },
-      map: {sources: activeSourceIds.length, layers: activeLayerIds.length, loadedTiles: null},
+      map: {
+        sources: activeSourceIds.length,
+        layers: activeLayerIds.length,
+        loadedTiles: null,
+        canvasCssPixels: {width: canvas.clientWidth, height: canvas.clientHeight},
+        renderBufferPixels: {
+          width: canvas.width,
+          height: canvas.height,
+          megapixels: Number((canvas.width * canvas.height / 1_000_000).toFixed(2)),
+        },
+      },
       workload: calculateWorkload(config),
       score: {total: 0, smoothness: 0, responsiveness: 0, stability: 0, scenarioKey: ''},
+      screenshots,
       errors,
     };
     lastResult.score = calculateBenchmarkScore(lastResult);
@@ -1387,7 +1467,7 @@ function loadScoreHistory(): BenchmarkResult[] {
   try {
     const stored = JSON.parse(localStorage.getItem(SCORE_HISTORY_STORAGE_KEY) ?? '[]') as BenchmarkResult[];
     return Array.isArray(stored)
-      ? stored.filter((result) => result?.schemaVersion === 5 && typeof result.score?.total === 'number').slice(0, 30)
+      ? stored.filter((result) => [5, 6].includes(result?.schemaVersion) && typeof result.score?.total === 'number').slice(0, 20)
       : [];
   } catch {
     return [];
@@ -1395,13 +1475,31 @@ function loadScoreHistory(): BenchmarkResult[] {
 }
 
 function updateScoreboardButton(): void {
-  scoreboardButton.disabled = scoreHistory.length === 0;
-  scoreboardButton.textContent = scoreHistory.length > 0 ? `Скоринг · ${scoreHistory.length}` : 'Скоринг';
+  const empty = scoreHistory.length === 0;
+  scoreboardButton.disabled = empty;
+  viewReportButton.disabled = empty;
+  downloadButton.disabled = empty;
+  downloadHtmlButton.disabled = empty;
+  scoreboardButton.textContent = scoreHistory.length > 0 ? `История запусков · ${scoreHistory.length}` : 'История запусков';
 }
 
 function storeScoreResult(result: BenchmarkResult): void {
-  scoreHistory = [result, ...scoreHistory.filter((item) => item.runId !== result.runId)].slice(0, 30);
-  localStorage.setItem(SCORE_HISTORY_STORAGE_KEY, JSON.stringify(scoreHistory));
+  scoreHistory = [result, ...scoreHistory.filter((item) => item.runId !== result.runId)].slice(0, 20);
+  try {
+    localStorage.setItem(SCORE_HISTORY_STORAGE_KEY, JSON.stringify(scoreHistory));
+  } catch {
+    scoreHistory = scoreHistory.map((item, index) => index < 8 ? item : {...item, screenshots: undefined});
+    try {
+      localStorage.setItem(SCORE_HISTORY_STORAGE_KEY, JSON.stringify(scoreHistory));
+    } catch {
+      scoreHistory = scoreHistory.map((item, index) => index === 0 ? item : {...item, screenshots: undefined});
+      try {
+        localStorage.setItem(SCORE_HISTORY_STORAGE_KEY, JSON.stringify(scoreHistory));
+      } catch {
+        // Прогон остаётся доступен в текущей вкладке, даже если хранилище браузера заполнено.
+      }
+    }
+  }
   updateScoreboardButton();
 }
 
@@ -1447,46 +1545,79 @@ function renderScoreboard(): void {
   `;
 }
 
+function verdictFor(result: BenchmarkResult): {tone: 'good' | 'warn' | 'bad'; label: string; text: string} {
+  if (result.errors.length > 0 || result.score.total < 550) {
+    return {tone: 'bad', label: 'Перегружено', text: 'Сценарий заметно превышает комфортный предел этого устройства.'};
+  }
+  if (result.score.total < 800 || result.frames.frameMsP95 > 25) {
+    return {tone: 'warn', label: 'На границе', text: 'Карта работает, но возможны рывки и задержки при взаимодействии.'};
+  }
+  return {tone: 'good', label: 'Стабильно', text: 'Устройство уверенно справилось с этим сценарием.'};
+}
+
+function deviceAssessment(result: Pick<BenchmarkResult, 'environment'>): {label: string; detail: string} {
+  const cores = result.environment.hardwareConcurrency;
+  const memory = result.environment.deviceMemoryGb;
+  if (cores === null && memory === null) return {label: 'Не определён', detail: 'Браузер скрыл сведения о CPU и памяти'};
+  const points = (cores === null ? 1 : cores >= 12 ? 3 : cores >= 6 ? 2 : 1)
+    + (memory === null ? 1 : memory >= 8 ? 3 : memory >= 4 ? 2 : 1);
+  const label = points >= 6 ? 'Высокий класс' : points >= 4 ? 'Средний класс' : 'Базовый класс';
+  return {
+    label,
+    detail: `${cores ?? 'н/д'} логич. CPU · ${memory ? `${memory} GB RAM` : 'RAM н/д'} · эвристика`,
+  };
+}
+
+function bottleneckFor(result: BenchmarkResult): string {
+  if (result.errors.length) return `Ошибки карты: ${result.errors[0]}`;
+  if (result.frames.frameMsP95 > 33) return 'Основное ограничение — тяжёлые кадры во время pan/zoom.';
+  if (result.longTasks.totalMs > 300) return 'Основное ограничение — блокировки главного потока JavaScript.';
+  if (result.timings.idleMs > 2_000) return 'Основное ограничение — долгая подготовка карты до состояния idle.';
+  if (result.timings.sourceAndLayerSetupMs > 1_000) return 'Основное ограничение — создание sources и style layers.';
+  return 'Явного узкого места в этом прогоне не обнаружено.';
+}
+
+function comparableDelta(result: BenchmarkResult): string | null {
+  const previous = scoreHistory.find((item) => item.runId !== result.runId && item.score.scenarioKey === result.score.scenarioKey);
+  if (!previous) return null;
+  const delta = result.score.total - previous.score.total;
+  return `${delta >= 0 ? '+' : ''}${delta} к предыдущему сопоставимому запуску`;
+}
+
 function renderMetrics(result: BenchmarkResult): void {
-  const megabytes = result.network.transferredBytes / 1024 / 1024;
+  const verdict = verdictFor(result);
+  const device = deviceAssessment(result);
+  const bufferMp = result.map.renderBufferPixels?.megapixels
+    ?? Number((result.environment.viewport.width * result.environment.viewport.height * result.environment.viewport.dpr ** 2 / 1_000_000).toFixed(2));
+  const delta = comparableDelta(result);
   setResultPanelCollapsed(false);
   metricsElement.innerHTML = `
-    <h3>Performance score</h3>
-    <dl>
-      ${metricCell('Score', `${result.score.total} / 1000`)}
-      ${metricCell('Плавность', `${result.score.smoothness} / 550`)}
-      ${metricCell('Отзывчивость', `${result.score.responsiveness} / 250`)}
-      ${metricCell('Стабильность', `${result.score.stability} / 200`)}
-    </dl>
-    <h3>Состав нагрузки</h3>
-    <dl>
-      ${metricCell('Профиль', profileLabel(result.config.profile))}
-      ${metricCell('Стиль', result.config.styleMode === 'gost' ? 'ГОСТ proxy' : 'Простой')}
-      ${metricCell('Уникальных объектов', result.workload.requestedUniqueFeatures.toLocaleString('ru-RU'))}
-      ${metricCell('Копий в sources', result.workload.sourceFeatureCopies.toLocaleString('ru-RU'))}
-      ${metricCell('Объект × слой', result.workload.featureLayerPairs.toLocaleString('ru-RU'))}
-      ${metricCell('Видимых объектов', result.workload.visibleUniqueFeatures.toLocaleString('ru-RU'))}
-      ${metricCell('Видимых попаданий', result.workload.visibleFeatureLayerHits.toLocaleString('ru-RU'))}
-      ${metricCell('Sources темы', result.workload.benchmarkSources)}
-      ${metricCell('Sources всего', result.workload.totalSources)}
-      ${metricCell('Тестовых layers', result.workload.benchmarkLayers)}
-      ${metricCell('Всего style layers', result.workload.totalStyleLayers)}
-      ${metricCell('Symbol layers', result.workload.layerTypes.symbol)}
-      ${metricCell('Line / Fill', `${result.workload.layerTypes.line} / ${result.workload.layerTypes.fill}`)}
-      ${metricCell('DPR рендера', result.environment.viewport.dpr.toFixed(2))}
-      ${metricCell('Радиус разброса', `${result.config.spreadKm.toFixed(0)} км`)}
-      ${metricCell('Плотность сцены', `${(result.workload.requestedUniqueFeatures / (Math.PI * result.config.spreadKm ** 2)).toFixed(2)} / км²`)}
-    </dl>
-    <h3>Производительность</h3>
-    <dl>
-      ${metricCell('FPS', result.frames.fps.toFixed(1))}
-      ${metricCell('Frame p95', `${result.frames.frameMsP95.toFixed(1)} ms`)}
-      ${metricCell('До idle', `${result.timings.idleMs.toFixed(0)} ms`)}
-      ${metricCell('Setup', `${result.timings.sourceAndLayerSetupMs.toFixed(0)} ms`)}
-      ${metricCell('Long tasks', result.longTasks.count)}
-      ${metricCell('Network', `${megabytes.toFixed(2)} MB`)}
-    </dl>
-    <p class="metric-note">${result.environment.renderer ?? 'WebGL renderer недоступен'}</p>
+    <section class="result-verdict is-${verdict.tone}">
+      <div><span>Итог сценария</span><strong>${verdict.label}</strong></div>
+      <b>${result.score.total}<small>/1000</small></b>
+      <p>${verdict.text}</p>
+      ${delta ? `<small class="result-delta">${escapeHtml(delta)}</small>` : ''}
+    </section>
+    <h3>Что реально отрисовано</h3>
+    <div class="result-hero-grid">
+      <div><span>Объектов на экране</span><strong>${result.workload.visibleUniqueFeatures.toLocaleString('ru-RU')}</strong><small>уникальных</small></div>
+      <div><span>Попаданий в стили</span><strong>${result.workload.visibleFeatureLayerHits.toLocaleString('ru-RU')}</strong><small>объект × layer</small></div>
+      <div><span>Буфер GPU</span><strong>${bufferMp.toFixed(2)}</strong><small>мегапикселей</small></div>
+    </div>
+    <section class="plain-result-list">
+      <div><span>Загружено в сценарий</span><strong>${result.workload.requestedUniqueFeatures.toLocaleString('ru-RU')} объектов</strong></div>
+      <div><span>Структура карты</span><strong>${result.workload.benchmarkSources} sources · ${result.workload.benchmarkLayers} layers</strong></div>
+      <div><span>Плавность pan/zoom</span><strong>${result.frames.fps.toFixed(1)} FPS · p95 ${result.frames.frameMsP95.toFixed(1)} ms</strong></div>
+      <div><span>Подготовка</span><strong>setup ${result.timings.sourceAndLayerSetupMs.toFixed(0)} ms · idle ${result.timings.idleMs.toFixed(0)} ms</strong></div>
+    </section>
+    <h3>Устройство</h3>
+    <section class="device-summary">
+      <strong>${device.label}</strong>
+      <span>${escapeHtml(device.detail)}</span>
+      <small>${escapeHtml(result.environment.renderer ?? 'WebGL renderer не раскрыт')}</small>
+    </section>
+    <p class="bottleneck-note">${escapeHtml(bottleneckFor(result))}</p>
+    <p class="metric-note">Класс устройства — ориентир по данным браузера, не измерение загрузки CPU/GPU в процентах. Все сырые метрики и снимки карты находятся в отчёте.</p>
   `;
 }
 
@@ -1512,16 +1643,26 @@ function reportRows(rows: Array<[string, string | number]>): string {
   return rows.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join('');
 }
 
-function benchmarkReportContent(result: BenchmarkResult): string {
+function singleRunReportContent(result: BenchmarkResult): string {
   const config = result.config;
+  const verdict = verdictFor(result);
+  const device = deviceAssessment(result);
+  const screenshots = result.screenshots?.map((shot) => `
+    <figure class="report-shot">
+      ${shot.dataUrl ? `<img src="${shot.dataUrl}" alt="${escapeHtml(shot.label)}">` : '<div class="shot-missing">Снимок недоступен</div>'}
+      <figcaption><strong>${escapeHtml(shot.label)}</strong><span>+${shot.elapsedMs} ms · zoom ${shot.zoom.toFixed(2)} · ${shot.visibleUniqueFeatures.toLocaleString('ru-RU')} объектов на экране</span>${shot.error ? `<small>${escapeHtml(shot.error)}</small>` : ''}</figcaption>
+    </figure>
+  `).join('') ?? '';
   return `
     <section class="report-summary">
+      <div><span>Вердикт</span><strong>${verdict.label}</strong></div>
       <div><span>Score</span><strong>${result.score.total}</strong></div>
-      <div><span>FPS</span><strong>${result.frames.fps.toFixed(1)}</strong></div>
-      <div><span>Frame p95</span><strong>${result.frames.frameMsP95.toFixed(1)} ms</strong></div>
-      <div><span>До idle</span><strong>${result.timings.idleMs.toFixed(0)} ms</strong></div>
-      <div><span>Style layers</span><strong>${result.workload.totalStyleLayers}</strong></div>
+      <div><span>На экране</span><strong>${result.workload.visibleUniqueFeatures.toLocaleString('ru-RU')}</strong></div>
+      <div><span>FPS / p95</span><strong>${result.frames.fps.toFixed(1)} / ${result.frames.frameMsP95.toFixed(1)}</strong></div>
+      <div><span>Устройство</span><strong>${device.label}</strong></div>
     </section>
+    <p class="report-conclusion">${escapeHtml(verdict.text)} ${escapeHtml(bottleneckFor(result))}</p>
+    ${screenshots ? `<section class="report-section"><h3>Карта по этапам</h3><div class="report-shots">${screenshots}</div></section>` : ''}
     <section class="report-section">
       <h3>Сценарий</h3>
       <dl>${reportRows([
@@ -1546,6 +1687,7 @@ function benchmarkReportContent(result: BenchmarkResult): string {
         ['Объект × слой', result.workload.featureLayerPairs.toLocaleString('ru-RU')],
         ['Видимых объектов', result.workload.visibleUniqueFeatures.toLocaleString('ru-RU')],
         ['Видимых попаданий', result.workload.visibleFeatureLayerHits.toLocaleString('ru-RU')],
+        ['Буфер рендера', result.map.renderBufferPixels ? `${result.map.renderBufferPixels.width} × ${result.map.renderBufferPixels.height} · ${result.map.renderBufferPixels.megapixels} MP` : 'н/д'],
         ['Symbol / Line / Fill', `${result.workload.layerTypes.symbol} / ${result.workload.layerTypes.line} / ${result.workload.layerTypes.fill}`],
         ['Viewport', `${result.environment.viewport.width} × ${result.environment.viewport.height} @${result.environment.viewport.dpr}`],
         ['Плотность сцены', `${(result.workload.requestedUniqueFeatures / (Math.PI * config.spreadKm ** 2)).toFixed(2)} / км²`],
@@ -1580,10 +1722,39 @@ function benchmarkReportContent(result: BenchmarkResult): string {
   `;
 }
 
-function benchmarkReportDocument(result: BenchmarkResult): string {
-  return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MapLibre benchmark ${escapeHtml(result.runId)}</title><style>
-    :root{font-family:Inter,system-ui,sans-serif;color:#18302b;background:#eef4f1}body{max-width:1100px;margin:0 auto;padding:32px}header{margin-bottom:24px}h1{margin:4px 0;font-size:30px}p{color:#59716b}.report-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.report-summary div,.report-section{background:#fff;border:1px solid #d7e3de;border-radius:12px;padding:18px}.report-summary span,dt{color:#688079;font-size:11px;text-transform:uppercase;letter-spacing:.06em}.report-summary strong{display:block;margin-top:6px;font-size:24px}.report-section{margin-top:14px}.report-section h3{margin:0 0 12px}.report-section dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;margin:0;background:#dce7e2}.report-section dl div{background:#fff;padding:10px}.report-section dd{margin:4px 0 0;font-weight:600;overflow-wrap:anywhere}@media print{body{background:#fff;padding:0}.report-section,.report-summary div{break-inside:avoid}}
-  </style></head><body><header><p>ЦП ЕИТП · GIS PoC</p><h1>MapLibre Performance Lab</h1><p>${escapeHtml(new Date(result.timestamp).toLocaleString('ru-RU'))}</p></header>${benchmarkReportContent(result)}</body></html>`;
+function cumulativeReportContent(history: BenchmarkResult[]): string {
+  if (history.length === 0) return '<div class="score-empty">Сначала выполните Benchmark.</div>';
+  const latest = history[0];
+  const rows = history.map((run, index) => {
+    const verdict = verdictFor(run);
+    return `<tr class="${index === 0 ? 'is-comparable' : ''}"><td>${new Date(run.timestamp).toLocaleString('ru-RU')}</td><td>${run.config.mode.toUpperCase()}</td><td>${profileLabel(run.config.profile)}</td><td>${run.workload.visibleUniqueFeatures.toLocaleString('ru-RU')}</td><td>${run.workload.benchmarkSources} / ${run.workload.benchmarkLayers}</td><td>${run.frames.fps.toFixed(1)}</td><td>${run.frames.frameMsP95.toFixed(1)} ms</td><td>${run.score.total}</td><td>${verdict.label}</td></tr>`;
+  }).join('');
+  return `
+    <section class="report-history-head">
+      <div><span>Запусков сохранено</span><strong>${history.length}</strong></div>
+      <div><span>Период</span><strong>${new Date(history.at(-1)!.timestamp).toLocaleDateString('ru-RU')} — ${new Date(latest.timestamp).toLocaleDateString('ru-RU')}</strong></div>
+      <div><span>Последний сценарий</span><strong>${latest.config.mode.toUpperCase()} · ${latest.workload.benchmarkSources}/${latest.workload.benchmarkLayers}</strong></div>
+    </section>
+    <section class="report-section"><h3>Сравнение всех запусков</h3><div class="report-table-wrap"><table class="score-table"><thead><tr><th>Дата</th><th>Доставка</th><th>Профиль</th><th>На экране</th><th>Sources / layers</th><th>FPS</th><th>p95</th><th>Score</th><th>Итог</th></tr></thead><tbody>${rows}</tbody></table></div></section>
+    <section class="report-run"><h2>Последний запуск</h2>${singleRunReportContent(latest)}</section>
+    ${history.slice(1).map((run, index) => `<details class="report-run"><summary>${history.length - index - 1}. ${new Date(run.timestamp).toLocaleString('ru-RU')} · ${run.config.mode.toUpperCase()} · score ${run.score.total}</summary>${singleRunReportContent(run)}</details>`).join('')}
+  `;
+}
+
+function cumulativeReportDocument(history: BenchmarkResult[]): string {
+  return `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MapLibre cumulative benchmark report</title><style>
+    :root{font-family:Inter,system-ui,sans-serif;color:#18302b;background:#eef4f1}body{max-width:1280px;margin:0 auto;padding:32px}header{margin-bottom:24px}h1{margin:4px 0;font-size:30px}p{color:#59716b}.report-history-head,.report-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}.report-history-head>div,.report-summary>div,.report-section,.report-run{background:#fff;border:1px solid #d7e3de;border-radius:12px;padding:18px}.report-history-head span,.report-summary span,dt{color:#688079;font-size:11px;text-transform:uppercase;letter-spacing:.06em}.report-history-head strong,.report-summary strong{display:block;margin-top:6px;font-size:21px}.report-section,.report-run{margin-top:14px}.report-section h3{margin:0 0 12px}.report-section dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;margin:0;background:#dce7e2}.report-section dl div{background:#fff;padding:10px}.report-section dd{margin:4px 0 0;font-weight:600;overflow-wrap:anywhere}.report-conclusion{padding:14px;background:#edf7f2;border-left:4px solid #29a77d}.report-shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}.report-shot{margin:0;border:1px solid #d7e3de;border-radius:10px;overflow:hidden}.report-shot img,.shot-missing{display:block;width:100%;aspect-ratio:16/9;object-fit:cover;background:#dce7e2}.shot-missing{display:grid;place-items:center;color:#688079}.report-shot figcaption{display:grid;gap:3px;padding:10px}.report-shot figcaption span,.report-shot figcaption small{color:#688079;font-size:11px}.score-table{width:100%;border-collapse:collapse;font-size:12px}.score-table th,.score-table td{padding:9px;text-align:left;border-bottom:1px solid #d7e3de}.report-table-wrap{overflow:auto}details summary{cursor:pointer;font-weight:700}.report-run h2{margin-top:0}@media(max-width:700px){body{padding:14px}}@media print{body{background:#fff;padding:0}.report-section,.report-summary>div,.report-run{break-inside:avoid}}
+  </style></head><body><header><p>ЦП ЕИТП · GIS PoC</p><h1>MapLibre Performance Lab</h1><p>Накопительный отчёт сформирован ${escapeHtml(new Date().toLocaleString('ru-RU'))}. Сохранено запусков: ${history.length}.</p></header>${cumulativeReportContent(history)}</body></html>`;
+}
+
+function cumulativeReportData(history: BenchmarkResult[]): object {
+  return {
+    reportSchemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    description: 'Накопительный отчёт MapLibre Performance Lab. Сравнивать score следует только у одинаковых scenarioKey.',
+    limitations: ['Браузер не предоставляет точную загрузку CPU/GPU в процентах.', 'Класс устройства является эвристической оценкой.'],
+    runs: history,
+  };
 }
 
 function downloadTextFile(contents: string, filename: string, type: string): void {
@@ -1803,18 +1974,18 @@ toggleLiveStyleButton.addEventListener('click', () => {
 stopLiveButton.addEventListener('click', () => stopRealtimeMonitoring());
 
 downloadButton.addEventListener('click', () => {
-  if (!lastResult) return;
-  downloadTextFile(JSON.stringify(lastResult, null, 2), `maplibre-benchmark-${lastResult.runId}.json`, 'application/json');
+  if (scoreHistory.length === 0) return;
+  downloadTextFile(JSON.stringify(cumulativeReportData(scoreHistory), null, 2), `maplibre-benchmark-history-${new Date().toISOString().slice(0, 10)}.json`, 'application/json');
 });
 
 downloadHtmlButton.addEventListener('click', () => {
-  if (!lastResult) return;
-  downloadTextFile(benchmarkReportDocument(lastResult), `maplibre-benchmark-${lastResult.runId}.html`, 'text/html');
+  if (scoreHistory.length === 0) return;
+  downloadTextFile(cumulativeReportDocument(scoreHistory), `maplibre-benchmark-report-${new Date().toISOString().slice(0, 10)}.html`, 'text/html');
 });
 
 viewReportButton.addEventListener('click', () => {
-  if (!lastResult) return;
-  reportDialogContent.innerHTML = benchmarkReportContent(lastResult);
+  if (scoreHistory.length === 0) return;
+  reportDialogContent.innerHTML = cumulativeReportContent(scoreHistory);
   reportDialog.showModal();
 });
 

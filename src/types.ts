@@ -44,8 +44,19 @@ export interface BenchmarkScore {
   scenarioKey: string;
 }
 
+export interface BenchmarkScreenshot {
+  stage: 'scene-ready' | 'interaction-mid' | 'completed';
+  label: string;
+  elapsedMs: number;
+  dataUrl: string | null;
+  visibleUniqueFeatures: number;
+  visibleFeatureLayerHits: number;
+  zoom: number;
+  error: string | null;
+}
+
 export interface BenchmarkResult {
-  schemaVersion: 5;
+  schemaVersion: 5 | 6;
   runId: string;
   timestamp: string;
   config: BenchmarkConfig;
@@ -68,7 +79,13 @@ export interface BenchmarkResult {
   longTasks: {count: number; totalMs: number; maxMs: number};
   network: {requests: number; transferredBytes: number; decodedBytes: number};
   memory: {usedJsHeapBytes: number | null; totalJsHeapBytes: number | null};
-  map: {sources: number; layers: number; loadedTiles: number | null};
+  map: {
+    sources: number;
+    layers: number;
+    loadedTiles: number | null;
+    canvasCssPixels?: {width: number; height: number};
+    renderBufferPixels?: {width: number; height: number; megapixels: number};
+  };
   workload: {
     requestedUniqueFeatures: number;
     sourceFeatureCopies: number;
@@ -84,6 +101,7 @@ export interface BenchmarkResult {
     layerTypes: {circle: number; line: number; fill: number; symbol: number; other: number};
   };
   score: BenchmarkScore;
+  screenshots?: BenchmarkScreenshot[];
   errors: string[];
 }
 

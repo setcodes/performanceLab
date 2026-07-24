@@ -68,7 +68,7 @@ for (const scenario of scenarios) {
       return window.benchmarkApi.run({...input, interactionMs: 3_000});
     }, scenario) as BenchmarkResult;
 
-    expect(result.schemaVersion).toBe(5);
+    expect(result.schemaVersion).toBe(6);
     expect(result.score.total).toBeGreaterThanOrEqual(0);
     expect(result.score.total).toBeLessThanOrEqual(1_000);
     // A heavily blocked main thread can legitimately produce only a few RAF samples;
@@ -88,6 +88,9 @@ for (const scenario of scenarios) {
     expect(result.workload.featureLayerPairs).toBe(expectedPairs);
     expect(result.workload.benchmarkLayers).toBe(scenario.layerCount);
     expect(result.workload.totalStyleLayers).toBe((scenario.layerCount ?? 0) + 1);
+    expect(result.screenshots).toHaveLength(3);
+    expect(result.screenshots?.every((shot) => shot.dataUrl?.startsWith('data:image/'))).toBe(true);
+    expect(result.map.renderBufferPixels?.megapixels).toBeGreaterThan(0);
     expect(result.errors, result.errors.join('\n')).toEqual([]);
 
     if (enforceBudgets) {
@@ -126,9 +129,12 @@ test('GOST working profile applies compound styles', async ({page}) => {
   await page.locator('#view-report-button').click();
   await expect(page.locator('#report-dialog')).toBeVisible();
   await expect(page.locator('#report-dialog-content')).toContainText('Производительность');
+  await expect(page.locator('#report-dialog-content')).toContainText('Карта по этапам');
+  await expect(page.locator('#report-dialog .report-shot img')).toHaveCount(3);
   await page.locator('#close-report-button').click();
-  await expect(page.locator('#metrics .metric-cell')).toHaveCount(26);
-  await expect(page.locator('#metrics .metric-cell').first()).toHaveAttribute('data-tooltip', /оценка 0–1000/i);
+  await expect(page.locator('#metrics')).toContainText('Что реально отрисовано');
+  await expect(page.locator('#metrics')).toContainText('Устройство');
+  await expect(page.locator('#metrics')).toContainText('Буфер GPU');
   await page.evaluate(async () => {
     for (let index = 0; index < 2; index += 1) {
       await window.benchmarkApi.run({
@@ -193,7 +199,7 @@ test('realtime mode exposes live screen and hardware metrics', async ({page}) =>
   }));
 
   await expect(page.locator('#status')).toContainText('Realtime-мониторинг активен');
-  await expect(page.locator('#metrics')).toContainText('Состав экрана');
+  await expect(page.locator('#metrics')).toContainText('Что реально на экране');
   await expect(page.locator('#metrics')).toContainText('JS heap');
   await expect(page.locator('#metrics')).toContainText('DPR рендера');
   await expect(page.locator('#metrics')).toContainText('1.50');

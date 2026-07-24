@@ -10,7 +10,7 @@ let k6 = null;
 for (const file of files) {
   try {
     const value = JSON.parse(await readFile(path.join(rawDir, file), 'utf8'));
-    if ([1, 2, 3, 4].includes(value.schemaVersion) && value.config && value.frames) browserRuns.push(value);
+    if ([1, 2, 3, 4, 5, 6].includes(value.schemaVersion) && value.config && value.frames) browserRuns.push(value);
     if (file === 'k6-summary.json') k6 = value;
   } catch (error) {
     console.warn(`Пропущен ${file}: ${error.message}`);
