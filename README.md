@@ -54,7 +54,7 @@ npm run report
 ```bash
 git clone https://github.com/setcodes/performanceLab.git
 cd performanceLab
-docker compose up -d --build --wait
+docker compose up -d --wait
 ```
 
 После запуска откройте <http://localhost:4173>. В контейнерах автоматически
@@ -64,6 +64,19 @@ docker compose up -d --build --wait
 - Martin на <http://localhost:3000>;
 - PostgreSQL 17 с PostGIS 3.5;
 - детерминированные тестовые данные и профили разброса 3, 30 и 150 км.
+
+Готовые multi-arch образы публикуются в GitHub Container Registry:
+
+- `ghcr.io/setcodes/performancelab-web:latest`;
+- `ghcr.io/setcodes/performancelab-martin:1.3.1`;
+- `ghcr.io/setcodes/performancelab-postgis:17-3.5`.
+
+Обычный запуск не собирает приложение и не загружает базовые Node/nginx-слои
+по отдельности. Для принудительной локальной пересборки после изменения исходников:
+
+```bash
+docker compose up -d --build --wait
+```
 
 Первый запуск дольше последующих: PostGIS выполняет SQL из
 `infra/postgis/init/` и создаёт 250 000 точек, 50 000 линий и 10 000 полигонов
@@ -81,14 +94,14 @@ docker compose down
 Порт интерфейса можно изменить:
 
 ```bash
-WEB_PORT=8088 docker compose up -d --build --wait
+WEB_PORT=8088 docker compose up -d --wait
 ```
 
 Полностью пересоздать БД и повторить начальное заполнение:
 
 ```bash
 docker compose down -v
-docker compose up -d --build --wait
+docker compose up -d --wait
 ```
 
 Команда с `-v` удаляет только volume этого compose-проекта и все находящиеся в
